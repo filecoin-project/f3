@@ -45,9 +45,10 @@ LongestChain(S) == IF S={} THEN <<>> ELSE CHOOSE c \in S: \A d \in S: Len(c)>=Le
 
 SP == 1..N
 
+
 (*--algorithm GraniteAlg {
   variables SentMsgs={}; \* Models a broadcast network
-  tickets = 1..N; decisions = {}; \*TODO this works only for 1 round of tickets, expand to more
+  tickets = 1..N; decisions = {}; decided = [sp \in SP |-> FALSE] \*TODO this works only for 1 round of tickets, expand to more
   
   define {
     \* quality related
@@ -59,7 +60,7 @@ SP == 1..N
              PrefixPower(prefix,msgset\{msg})
     Allowed(M) == IF M = {} THEN {<<>>} ELSE {pref \in AllInputPrefixes: PrefixPower(pref,M) > 50percQAP}
     BestQualityProposal(M) == LongestChain(Allowed(M))
-    \* propose related
+    \* prepare and commit related
     SentTypedRoundMsgs(t,r) == {m \in SentMsgs: (m.type=t) /\ (m.round=r)}
     RECURSIVE PowerMsgSet(_)
     PowerMsgSet(msgset) == IF msgset={} THEN 0 ELSE
@@ -75,10 +76,6 @@ SP == 1..N
         LET msg == CHOOSE msg \in msgset: TRUE
         IN  IF msg.proposal = prop THEN PT[msg.id] + PropWeight(prop,msgset\{msg}) ELSE 
         PropWeight(prop,msgset\{msg})
-    ModeProposal(proposeset) == CHOOSE prop \in ProposalsInMsgSet(proposeset): 
-                                    \A prop2 \in ProposalsInMsgSet(proposeset): 
-                                        PropWeight(prop,proposeset)>=PropWeight(prop2,proposeset)
-    \* prepare and commit related
     HasStrongQuorum(msgset) == \E v \in ProposalsInMsgSet(msgset): PropWeight(v,msgset) > 66percQAP
     StrongQuorumValue(msgset) == CHOOSE v\in ProposalsInMsgSet(msgset): PropWeight(v,msgset) > 66percQAP  
     
@@ -98,17 +95,6 @@ SP == 1..N
      SentMsgs:=SentMsgs \union {[id|-> self, type |->"QUAL", proposal |-> proposal]};
    }
    
-   \* participant calls this at the end of its quality/converge step 
-   \* (expiration of 2\Delta timer) here we do not wait for StrongQuorum
-   \* sends PROPOSE
-   macro sendPROP()
-   {
-     if (round > 0) { \*new version ov Nov 2 does not send PROPOSE in round=0
-        proposal := LowestTicketProposal(SentTypedRoundMsgs("CONV",round));  
-        SentMsgs:=SentMsgs \union {[id|-> self, type |->"PROP", proposal |-> proposal, round |-> round]};
-     }  
-   }   
-   
    \* sends PREPARE 
    macro sendPREP()
    {
@@ -116,8 +102,9 @@ SP == 1..N
        proposal := BestQualityProposal(SentTypedMsgs("QUAL"));
        value:=proposal;
      } else {
-     await (Power("PROP",round)>66percQAP);
-     value:= ModeProposal(SentTypedRoundMsgs("PROP",round)); 
+     \* await (Power("CONV",round)>66percQAP);
+     proposal := LowestTicketProposal(SentTypedRoundMsgs("CONV",round));  
+     \* value:= ModeProposal(SentTypedRoundMsgs("PROP",round)); 
      };
      SentMsgs:=SentMsgs \union {[id|-> self, type |->"PREP", proposal |-> value, round |-> round]};
    }
@@ -125,41 +112,43 @@ SP == 1..N
    \* sends COMMIT 
    macro sendCOMM()
    {
-     await (Power("PREP",round)>66percQAP);
+     await (Power("PREP",round)>66percQAP \/ decided[self]=TRUE);
+     if (~decided[self]) {
      if (HasStrongQuorum(SentTypedRoundMsgs("PREP",round)))  
         value:= StrongQuorumValue(SentTypedRoundMsgs("PREP",round)); 
      else {
         value:=Bottom;
      };
      SentMsgs:=SentMsgs \union {[id|-> self, type |->"COMM", proposal |-> value, round |-> round]};
-     \*print(SentMsgs);
+     }
    }
    
    \*Decide or next round
    macro processCOMMIT()
    {
-     await (Power("COMM",round)>66percQAP);
+     await (Power("COMM",round)>66percQAP \/ decided[self]=TRUE);
+     if (~decided[self]) {
      if (HasStrongQuorum(SentTypedRoundMsgs("COMM",round))) {
         value:= StrongQuorumValue(SentTypedRoundMsgs("COMM",round));
         if (value # Bottom) {
             decisions := decisions \union {value};
-            decided := TRUE;
+            decided[self] := TRUE;
             assert decisions = {value} \* only one element in decisions always (Agreement)
         } else { \* value is Bottom
             if (Cardinality(ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round)))>1) {
                 proposal := CHOOSE v \in ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round)): v#Bottom;
-                assert (Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal);
-                }
+                };
+            assert (Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal);
         }
      } 
      else { \*there is no strong quorum - the same as if value is Bottom (TODO: make this less repetitive)
         if (Cardinality(ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round)))>1) {
         proposal := CHOOSE v \in ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round)): v#Bottom;
+        };
         assert (Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal);
-        }
      }; 
      round:=round+1;
-     \*print(SentMsgs);
+     }
    }
    
    \* sends CONVERGE (round>0)
@@ -173,27 +162,30 @@ SP == 1..N
         assert tkt \in Tickets;
    }
    
+   macro sendDecide() {
+        if (decided[self]) decided := [sp\in SP |-> TRUE]; 
+   }
     
   fair process (name \in SP) 
-  variables proposal = Input[self]; round = 0; decided = FALSE; tkt=0; value = Input[self];
+  variables proposal = Input[self]; round = 0; tkt=0; value = Input[self];
  {
- l: while(~decided /\ round < 2) {   \*TODO change round to be param 
+ l: while(~decided[self] /\ round < 2) {   \*TODO change round to be param 
      if (round = 0) 
         SendQUAL: sendQUAL();
      else {
         SendCONV: sendCONV();
-        SendPROP: sendPROP();
      };
      SendPREP: sendPREP();
      SendCOMM: sendCOMM();
      ProcessCommit: processCOMMIT();
-  }
+  };
+     SendDecide: sendDecide();
        
   }
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "b07c14d6" /\ chksum(tla) = "68a6024f")
-VARIABLES SentMsgs, tickets, decisions, pc
+\* BEGIN TRANSLATION (chksum(pcal) = "eb6733d9" /\ chksum(tla) = "ef22de6")
+VARIABLES SentMsgs, tickets, decisions, decided, pc
 
 (* define statement *)
 SentTypedMsgs(t) == {m \in SentMsgs: (m.type=t)}
@@ -220,10 +212,6 @@ PropWeight(prop,msgset) == IF msgset = {} THEN 0 ELSE
     LET msg == CHOOSE msg \in msgset: TRUE
     IN  IF msg.proposal = prop THEN PT[msg.id] + PropWeight(prop,msgset\{msg}) ELSE
     PropWeight(prop,msgset\{msg})
-ModeProposal(proposeset) == CHOOSE prop \in ProposalsInMsgSet(proposeset):
-                                \A prop2 \in ProposalsInMsgSet(proposeset):
-                                    PropWeight(prop,proposeset)>=PropWeight(prop2,proposeset)
-
 HasStrongQuorum(msgset) == \E v \in ProposalsInMsgSet(msgset): PropWeight(v,msgset) > 66percQAP
 StrongQuorumValue(msgset) == CHOOSE v\in ProposalsInMsgSet(msgset): PropWeight(v,msgset) > 66percQAP
 
@@ -236,9 +224,9 @@ LowestTicketProposal(M) == IF M = {} THEN {<<>>} ELSE
     CHOOSE prop \in ProposalsInMsgSet(M):
         \E msg \in M: (msg.ticket = Mintkt(M)) /\ (msg.proposal = prop)
 
-VARIABLES proposal, round, decided, tkt, value
+VARIABLES proposal, round, tkt, value
 
-vars == << SentMsgs, tickets, decisions, pc, proposal, round, decided, tkt, 
+vars == << SentMsgs, tickets, decisions, decided, pc, proposal, round, tkt, 
            value >>
 
 ProcSet == (SP)
@@ -247,10 +235,10 @@ Init == (* Global variables *)
         /\ SentMsgs = {}
         /\ tickets = 1..N
         /\ decisions = {}
+        /\ decided = [sp \in SP |-> FALSE]
         (* Process name *)
         /\ proposal = [self \in SP |-> Input[self]]
         /\ round = [self \in SP |-> 0]
-        /\ decided = [self \in SP |-> FALSE]
         /\ tkt = [self \in SP |-> 0]
         /\ value = [self \in SP |-> Input[self]]
         /\ pc = [self \in ProcSet |-> "l"]
@@ -260,64 +248,71 @@ l(self) == /\ pc[self] = "l"
                  THEN /\ IF round[self] = 0
                             THEN /\ pc' = [pc EXCEPT ![self] = "SendQUAL"]
                             ELSE /\ pc' = [pc EXCEPT ![self] = "SendCONV"]
-                 ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-           /\ UNCHANGED << SentMsgs, tickets, decisions, proposal, round, 
-                           decided, tkt, value >>
+                 ELSE /\ pc' = [pc EXCEPT ![self] = "SendDecide"]
+           /\ UNCHANGED << SentMsgs, tickets, decisions, decided, proposal, 
+                           round, tkt, value >>
 
 SendPREP(self) == /\ pc[self] = "SendPREP"
                   /\ IF round[self] = 0
                         THEN /\ proposal' = [proposal EXCEPT ![self] = BestQualityProposal(SentTypedMsgs("QUAL"))]
                              /\ value' = [value EXCEPT ![self] = proposal'[self]]
-                        ELSE /\ (Power("PROP",round[self])>66percQAP)
-                             /\ value' = [value EXCEPT ![self] = ModeProposal(SentTypedRoundMsgs("PROP",round[self]))]
-                             /\ UNCHANGED proposal
+                        ELSE /\ proposal' = [proposal EXCEPT ![self] = LowestTicketProposal(SentTypedRoundMsgs("CONV",round[self]))]
+                             /\ value' = value
                   /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"PREP", proposal |-> value'[self], round |-> round[self]]})
                   /\ pc' = [pc EXCEPT ![self] = "SendCOMM"]
-                  /\ UNCHANGED << tickets, decisions, round, decided, tkt >>
+                  /\ UNCHANGED << tickets, decisions, decided, round, tkt >>
 
 SendCOMM(self) == /\ pc[self] = "SendCOMM"
-                  /\ (Power("PREP",round[self])>66percQAP)
-                  /\ IF HasStrongQuorum(SentTypedRoundMsgs("PREP",round[self]))
-                        THEN /\ value' = [value EXCEPT ![self] = StrongQuorumValue(SentTypedRoundMsgs("PREP",round[self]))]
-                        ELSE /\ value' = [value EXCEPT ![self] = Bottom]
-                  /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"COMM", proposal |-> value'[self], round |-> round[self]]})
+                  /\ (Power("PREP",round[self])>66percQAP \/ decided[self]=TRUE)
+                  /\ IF ~decided[self]
+                        THEN /\ IF HasStrongQuorum(SentTypedRoundMsgs("PREP",round[self]))
+                                   THEN /\ value' = [value EXCEPT ![self] = StrongQuorumValue(SentTypedRoundMsgs("PREP",round[self]))]
+                                   ELSE /\ value' = [value EXCEPT ![self] = Bottom]
+                             /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"COMM", proposal |-> value'[self], round |-> round[self]]})
+                        ELSE /\ TRUE
+                             /\ UNCHANGED << SentMsgs, value >>
                   /\ pc' = [pc EXCEPT ![self] = "ProcessCommit"]
-                  /\ UNCHANGED << tickets, decisions, proposal, round, decided, 
+                  /\ UNCHANGED << tickets, decisions, decided, proposal, round, 
                                   tkt >>
 
 ProcessCommit(self) == /\ pc[self] = "ProcessCommit"
-                       /\ (Power("COMM",round[self])>66percQAP)
-                       /\ IF HasStrongQuorum(SentTypedRoundMsgs("COMM",round[self]))
-                             THEN /\ value' = [value EXCEPT ![self] = StrongQuorumValue(SentTypedRoundMsgs("COMM",round[self]))]
-                                  /\ IF value'[self] # Bottom
-                                        THEN /\ decisions' = (decisions \union {value'[self]})
-                                             /\ decided' = [decided EXCEPT ![self] = TRUE]
-                                             /\ Assert(decisions' = {value'[self]}, 
-                                                       "Failure of assertion at line 147, column 13 of macro called at line 189, column 21.")
-                                             /\ UNCHANGED proposal
+                       /\ (Power("COMM",round[self])>66percQAP \/ decided[self]=TRUE)
+                       /\ IF ~decided[self]
+                             THEN /\ IF HasStrongQuorum(SentTypedRoundMsgs("COMM",round[self]))
+                                        THEN /\ value' = [value EXCEPT ![self] = StrongQuorumValue(SentTypedRoundMsgs("COMM",round[self]))]
+                                             /\ IF value'[self] # Bottom
+                                                   THEN /\ decisions' = (decisions \union {value'[self]})
+                                                        /\ decided' = [decided EXCEPT ![self] = TRUE]
+                                                        /\ Assert(decisions' = {value'[self]}, 
+                                                                  "Failure of assertion at line 136, column 13 of macro called at line 180, column 21.")
+                                                        /\ UNCHANGED proposal
+                                                   ELSE /\ IF Cardinality(ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])))>1
+                                                              THEN /\ proposal' = [proposal EXCEPT ![self] = CHOOSE v \in ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])): v#Bottom]
+                                                              ELSE /\ TRUE
+                                                                   /\ UNCHANGED proposal
+                                                        /\ Assert((Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal'[self]), 
+                                                                  "Failure of assertion at line 141, column 13 of macro called at line 180, column 21.")
+                                                        /\ UNCHANGED << decisions, 
+                                                                        decided >>
                                         ELSE /\ IF Cardinality(ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])))>1
                                                    THEN /\ proposal' = [proposal EXCEPT ![self] = CHOOSE v \in ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])): v#Bottom]
-                                                        /\ Assert((Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal'[self]), 
-                                                                  "Failure of assertion at line 151, column 17 of macro called at line 189, column 21.")
                                                    ELSE /\ TRUE
                                                         /\ UNCHANGED proposal
-                                             /\ UNCHANGED << decisions, 
-                                                             decided >>
-                             ELSE /\ IF Cardinality(ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])))>1
-                                        THEN /\ proposal' = [proposal EXCEPT ![self] = CHOOSE v \in ProposalsInMsgSet(SentTypedRoundMsgs("COMM",round[self])): v#Bottom]
                                              /\ Assert((Cardinality(decisions)>0)=>(Cardinality(decisions)=1 /\ \E d\in decisions: d=proposal'[self]), 
-                                                       "Failure of assertion at line 158, column 9 of macro called at line 189, column 21.")
-                                        ELSE /\ TRUE
-                                             /\ UNCHANGED proposal
-                                  /\ UNCHANGED << decisions, decided, value >>
-                       /\ round' = [round EXCEPT ![self] = round[self]+1]
+                                                       "Failure of assertion at line 148, column 9 of macro called at line 180, column 21.")
+                                             /\ UNCHANGED << decisions, 
+                                                             decided, value >>
+                                  /\ round' = [round EXCEPT ![self] = round[self]+1]
+                             ELSE /\ TRUE
+                                  /\ UNCHANGED << decisions, decided, proposal, 
+                                                  round, value >>
                        /\ pc' = [pc EXCEPT ![self] = "l"]
                        /\ UNCHANGED << SentMsgs, tickets, tkt >>
 
 SendQUAL(self) == /\ pc[self] = "SendQUAL"
                   /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"QUAL", proposal |-> proposal[self]]})
                   /\ pc' = [pc EXCEPT ![self] = "SendPREP"]
-                  /\ UNCHANGED << tickets, decisions, proposal, round, decided, 
+                  /\ UNCHANGED << tickets, decisions, decided, proposal, round, 
                                   tkt, value >>
 
 SendCONV(self) == /\ pc[self] = "SendCONV"
@@ -326,23 +321,22 @@ SendCONV(self) == /\ pc[self] = "SendCONV"
                        /\ tickets' = tickets \ {tkt'[self]}
                   /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"CONV", proposal |-> proposal[self], round|-> round[self], ticket |-> tkt'[self]]})
                   /\ Assert(tkt'[self] \in Tickets, 
-                            "Failure of assertion at line 173, column 9 of macro called at line 184, column 19.")
-                  /\ pc' = [pc EXCEPT ![self] = "SendPROP"]
-                  /\ UNCHANGED << decisions, proposal, round, decided, value >>
-
-SendPROP(self) == /\ pc[self] = "SendPROP"
-                  /\ IF round[self] > 0
-                        THEN /\ proposal' = [proposal EXCEPT ![self] = LowestTicketProposal(SentTypedRoundMsgs("CONV",round[self]))]
-                             /\ SentMsgs' = (SentMsgs \union {[id|-> self, type |->"PROP", proposal |-> proposal'[self], round |-> round[self]]})
-                        ELSE /\ TRUE
-                             /\ UNCHANGED << SentMsgs, proposal >>
+                            "Failure of assertion at line 162, column 9 of macro called at line 176, column 19.")
                   /\ pc' = [pc EXCEPT ![self] = "SendPREP"]
-                  /\ UNCHANGED << tickets, decisions, round, decided, tkt, 
-                                  value >>
+                  /\ UNCHANGED << decisions, decided, proposal, round, value >>
+
+SendDecide(self) == /\ pc[self] = "SendDecide"
+                    /\ IF decided[self]
+                          THEN /\ decided' = [sp\in SP |-> TRUE]
+                          ELSE /\ TRUE
+                               /\ UNCHANGED decided
+                    /\ pc' = [pc EXCEPT ![self] = "Done"]
+                    /\ UNCHANGED << SentMsgs, tickets, decisions, proposal, 
+                                    round, tkt, value >>
 
 name(self) == l(self) \/ SendPREP(self) \/ SendCOMM(self)
                  \/ ProcessCommit(self) \/ SendQUAL(self) \/ SendCONV(self)
-                 \/ SendPROP(self)
+                 \/ SendDecide(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -359,5 +353,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 \* END TRANSLATION 
 =============================================================================
 \* Modification History
-\* Last modified Thu Nov 02 21:21:48 CET 2023 by marko
+\* Last modified Mon Nov 06 17:44:42 CET 2023 by marko
 \* Created Thu Nov 02 17:53:45 CET 2023 by marko
