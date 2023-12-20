@@ -1,4 +1,4 @@
-# F3 (Fast Finality Filecoin) project
+# F3 (Fast Finality Filecoin) PlusCal/TLA+ spec
 
 Currently, the Filecoin Expected Consensus protocol offers only probabilistic finality. By convention, a tipset 900 epochs old (approximately 7.5h) is considered "final", based on a protocol parameter that determines the longest fork that a node will consider re-organising.
 
@@ -12,4 +12,4 @@ Refer to the [F3 Indexer](https://docs.google.com/document/d/10IE6hfK16dbrH9lPWl
 
 ## This repository
 
-This repository stores a PlusCal-TLA+ specification for F3.
+This repository stores a PlusCal/TLA+ specification for F3.
