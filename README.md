@@ -12,4 +12,4 @@ Refer to the [F3 Indexer](https://docs.google.com/document/d/10IE6hfK16dbrH9lPWl
 
 ## This repository
 
-This repository stores a PlusCal/TLA+ specification for F3.
+This repository stores a PlusCal/TLA+ specification for GossiPBFT.
